@@ -14,11 +14,16 @@ param(
     [string]$AudioBitrate,
     [switch]$DryRun,
     [switch]$Help,
-    [switch]$AutoProfile
+    [switch]$AutoProfile,
+    [switch]$AiAdvisor,
+    [switch]$QualityCheck,
+    [string]$LogPath,
+    [int]$SampleSeconds = 30,
+    [int]$SampleStart = 60
 )
 
 function Show-Help {
-    Write-Host "Użycie: powershell -File convert-projector.ps1 [-Path <plik|katalog>] [-Recursive] [-Allow4K] [-VideoCodec <hevc|h264|vp9|av1|mpeg2|mpeg1>] [-AudioCodec <aac|mp3|wma>] [-OutputDir <katalog>] [-Overwrite] [-Force] [-VideoBitrate <np. 4M>] [-AudioBitrate <np. 192k>] [-DryRun]" -ForegroundColor Yellow
+    Write-Host "Użycie: powershell -File convert-projector.ps1 [-Path <plik|katalog>] [-Recursive] [-Allow4K] [-VideoCodec <hevc|h264|vp9|av1|mpeg2|mpeg1>] [-AudioCodec <aac|mp3|wma>] [-OutputDir <katalog>] [-Overwrite] [-Force] [-VideoBitrate <np. 4M>] [-AudioBitrate <np. 192k>] [-DryRun] [-AutoProfile] [-AiAdvisor] [-QualityCheck] [-LogPath <plik>] [-SampleSeconds <int>] [-SampleStart <int>]" -ForegroundColor Yellow
 }
 
 if ($Help) { Show-Help; exit 0 }
@@ -32,6 +37,10 @@ function Ensure-Tool($name) {
 
 Ensure-Tool ffmpeg
 Ensure-Tool ffprobe
+
+function Has-Encoder($enc) {
+    try { $o = & ffmpeg -hide_banner -encoders; $s = $o | Out-String; return ($s -match [regex]::Escape($enc)) } catch { return $false }
+}
 
 function Select-Path {
     param([string]$Mode)
@@ -149,12 +158,16 @@ function Build-AutoArgs($meta,[switch]$Allow4K,[string]$TargetContainer,[switch]
     if ($Overwrite) { $args += '-y' }
     if ($copyV -and $copyA) {
         $args += '-c:v','copy','-c:a','copy'
+        if ($AiAdvisor) { Write-Host ("Ai: kopiowanie v={0}, a={1}, kontener={2}" -f $meta.vcodec,$meta.acodec,$TargetContainer) -ForegroundColor DarkCyan }
         return $args
     }
     $tW = 1920; $tH = 1080
     if ($Allow4K) { $tW = 3840; $tH = 2160 }
     $needScale = ($meta.width -gt $tW -or $meta.height -gt $tH)
-    $vargs = @('-c:v','libx265','-tag:v','hvc1','-pix_fmt','yuv420p')
+    $vcodec = 'libx265'; $vtag = 'hvc1'
+    if (-not (Has-Encoder 'libx265')) { if (Has-Encoder 'libx264') { $vcodec = 'libx264'; $vtag = $null } elseif (Has-Encoder 'libvpx-vp9') { $vcodec = 'libvpx-vp9'; $vtag = $null } else { $vcodec = 'mpeg2video'; $vtag = $null } }
+    $vargs = @('-c:v',$vcodec,'-pix_fmt','yuv420p')
+    if ($vtag) { $vargs += '-tag:v',$vtag }
     if ($needScale) { $vargs += '-vf',"scale=${tW}:${tH}:force_original_aspect_ratio=decrease" }
     if (($meta.width -ge 3840 -or $meta.height -ge 2160) -and $Allow4K -and ($meta.fps -gt 30)) { $vargs += '-r','30' }
     $crf = 24
@@ -162,8 +175,41 @@ function Build-AutoArgs($meta,[switch]$Allow4K,[string]$TargetContainer,[switch]
     elseif ($tW -le 1280 -and $tH -le 720) { $crf = 22 }
     $vargs += '-crf',[string]$crf,'-preset','medium'
     $aargs = @()
-    if ($copyA) { $aargs += '-c:a','copy' } else { $aargs += '-c:a','aac','-b:a','192k' }
+    if ($copyA) { $aargs += '-c:a','copy' } else { if (Has-Encoder 'aac') { $aargs += '-c:a','aac','-b:a','192k' } elseif (Has-Encoder 'libmp3lame') { $aargs += '-c:a','libmp3lame','-b:a','192k' } elseif (Has-Encoder 'wmav2') { $aargs += '-c:a','wmav2','-b:a','192k' } else { $aargs += '-c:a','aac','-b:a','192k' } }
+    if ($AiAdvisor) {
+        $sc = if ($needScale) { "${tW}x${tH}" } else { "${meta.width}x${meta.height}" }
+        $fpsInfo = if (($meta.width -ge 3840 -or $meta.height -ge 2160) -and $Allow4K -and ($meta.fps -gt 30)) { "${meta.fps}->30" } else { "${meta.fps}" }
+        $aSel = $(if ($copyA) { 'copy' } else { $aargs[1] })
+        Write-Host ("Ai: transkod v={0} crf={1} preset=medium pix=yuv420p scale={2} fps={3} a={4} kontener={5}" -f $vcodec,$crf,$sc,$fpsInfo,$aSel,$TargetContainer) -ForegroundColor DarkCyan
+    }
     $args + $vargs + $aargs
+}
+
+function Compute-VMAF($ref,$dist,$tw,$th,$startSec,$durSec) {
+    try {
+        $tmp = [System.IO.Path]::GetTempFileName()
+        $fltc = "[0:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[rf];[1:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[ds];[rf][ds]libvmaf=log_path=${tmp}:log_fmt=json:n_threads=4"
+        & ffmpeg -hide_banner -nostdin -ss $startSec -t $durSec -i $ref -ss $startSec -t $durSec -i $dist -lavfi $fltc -f null - | Out-Null
+        $j = Get-Content -LiteralPath $tmp -Raw | ConvertFrom-Json
+        Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+        return [double]$j.metrics.VMAF_mean
+    } catch { return $null }
+}
+
+function Append-Metrics($obj,$LogPath) {
+    try {
+        $line = ($obj | ConvertTo-Json -Compress)
+        if ($LogPath) {
+            $dir = Split-Path -Parent $LogPath
+            if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+            if (-not (Test-Path -LiteralPath $LogPath)) { New-Item -ItemType File -Path $LogPath | Out-Null }
+            $line | Out-File -LiteralPath $LogPath -Append -Encoding utf8
+        } else {
+            $lp = Join-Path (Get-Location) 'conversion-log.jsonl'
+            if (-not (Test-Path -LiteralPath $lp)) { New-Item -ItemType File -Path $lp | Out-Null }
+            $line | Out-File -LiteralPath $lp -Append -Encoding utf8
+        }
+    } catch { Write-Host "Nie udało się zapisać logu" -ForegroundColor Yellow }
 }
 
 function Start-FFmpegWithProgress($ffmpegPath,$args,$duration,$activityName,$parentId) {
@@ -218,23 +264,61 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
     if (-not (Test-Path $odir)) { New-Item -ItemType Directory -Path $odir | Out-Null }
     $outName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name) + '_proj.' + $ext
     $outPath = Join-Path $odir $outName
+    $finalOut = $outPath
+    if ((Test-Path -LiteralPath $finalOut) -and -not $Overwrite) {
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($outName)
+        $extOut = [System.IO.Path]::GetExtension($outName)
+        $n = 1
+        do {
+            $candidate = Join-Path $odir ("{0} ({1}){2}" -f $base,$n,$extOut)
+            $n++
+        } while (Test-Path -LiteralPath $candidate)
+        $finalOut = $candidate
+    }
     $args = if ($AutoProfile) { Build-AutoArgs $meta -Allow4K:$Allow4K $ext -Overwrite:$Overwrite } else { Build-Args $meta $VideoCodec $AudioCodec -Allow4K:$Allow4K $VideoBitrate $AudioBitrate -Overwrite:$Overwrite }
     $ffArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @('-progress','pipe:1','-nostats',('"' + $finalOut + '"'))
-    Write-Host ("Konwersja: {0} -> {1}" -f $file.FullName,$outPath) -ForegroundColor Cyan
+    Write-Host ("Konwersja: {0} -> {1}" -f $file.FullName,$finalOut) -ForegroundColor Cyan
     $cmdStr = "ffmpeg " + ($ffArgs -join ' ')
     Write-Host ("Polecenie: " + $cmdStr) -ForegroundColor DarkGray
     if ($DryRun) { Write-Host ("[DRY] pomijam uruchomienie") -ForegroundColor Yellow; return }
     $res = Start-FFmpegWithProgress 'ffmpeg' $ffArgs $meta.duration ("Konwersja: " + $file.Name) 0
-    if (-not (Test-Path -LiteralPath $outPath)) {
+    if (-not (Test-Path -LiteralPath $finalOut)) {
         Write-Host "Ponowna próba bez progresu (diagnostyka)" -ForegroundColor Yellow
-        $plainArgs = @('-hide_banner','-nostdin','-v','warning','-i',$file.FullName) + $args + @($outPath)
+        $plainArgs = @('-hide_banner','-nostdin','-v','warning','-i',$file.FullName) + $args + @($finalOut)
         & ffmpeg $plainArgs
     }
-    if (Test-Path -LiteralPath $outPath) {
-        Write-Host ("Zapisano: " + $outPath) -ForegroundColor Green
+    $ok = $false
+    if (Test-Path -LiteralPath $finalOut) {
+        $ok = $true
+        Write-Host ("Zapisano: " + $finalOut) -ForegroundColor Green
     } else {
         Write-Host ("Błąd konwersji (ExitCode=" + $res.ExitCode + "; LASTEXITCODE=" + $LASTEXITCODE + ")") -ForegroundColor Red
         Write-Host ("Polecenie: " + $cmdStr) -ForegroundColor DarkYellow
+    }
+    $tw = 1920; $th = 1080
+    if ($Allow4K) { $tw = 3840; $th = 2160 }
+    $start = 0
+    if ($meta.duration -gt ($SampleStart + $SampleSeconds)) { $start = $SampleStart } elseif ($meta.duration -gt $SampleSeconds) { $start = [int]([double]$meta.duration - $SampleSeconds) }
+    $vmaf = $null
+    if ($QualityCheck -and $ok) { $vmaf = Compute-VMAF $file.FullName $finalOut $tw $th $start $SampleSeconds }
+    $rec = [pscustomobject]@{
+        source = $file.FullName
+        output = $finalOut
+        width = $meta.width
+        height = $meta.height
+        fps = $meta.fps
+        vcodec_in = $meta.vcodec
+        acodec_in = $meta.acodec
+        allow4k = [bool]$Allow4K
+        success = [bool]$ok
+        vmaf = $vmaf
+        time = (Get-Date).ToString('s')
+    }
+    Append-Metrics $rec $LogPath
+    if ($LogPath) {
+        if (-not (Test-Path -LiteralPath $LogPath)) {
+            $rec | ConvertTo-Json -Compress | Out-File -LiteralPath $LogPath -Append -Encoding utf8
+        }
     }
 }
 
