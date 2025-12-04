@@ -13,7 +13,8 @@ param(
     [string]$VideoBitrate,
     [string]$AudioBitrate,
     [switch]$DryRun,
-    [switch]$Help
+    [switch]$Help,
+    [switch]$AutoProfile
 )
 
 function Show-Help {
@@ -21,6 +22,8 @@ function Show-Help {
 }
 
 if ($Help) { Show-Help; exit 0 }
+
+if (-not $PSBoundParameters.ContainsKey('AutoProfile')) { $AutoProfile = $true }
 
 function Ensure-Tool($name) {
     $p = (Get-Command $name -ErrorAction SilentlyContinue)
@@ -135,6 +138,34 @@ function Build-Args($meta,$VideoCodec,$AudioCodec,[switch]$Allow4K,$VideoBitrate
     $args + $vargs + $aargs
 }
 
+function Build-AutoArgs($meta,[switch]$Allow4K,[string]$TargetContainer,[switch]$Overwrite) {
+    $okV = @('hevc','h265','h264','avc','vp9','av1','mpeg1video','mpeg2video','avs2')
+    $okA = @('aac','mp3','wmav2','wma')
+    $canCopyV1080 = ($okV -contains $meta.vcodec) -and ($meta.width -le 1920 -and $meta.height -le 1080)
+    $canCopyV4K = ($okV -contains $meta.vcodec) -and ($meta.width -ge 3840 -or $meta.height -ge 2160) -and ($meta.fps -le 30) -and $Allow4K
+    $copyV = $canCopyV1080 -or $canCopyV4K
+    $copyA = ($okA -contains $meta.acodec)
+    $args = @()
+    if ($Overwrite) { $args += '-y' }
+    if ($copyV -and $copyA) {
+        $args += '-c:v','copy','-c:a','copy'
+        return $args
+    }
+    $tW = 1920; $tH = 1080
+    if ($Allow4K) { $tW = 3840; $tH = 2160 }
+    $needScale = ($meta.width -gt $tW -or $meta.height -gt $tH)
+    $vargs = @('-c:v','libx265','-tag:v','hvc1','-pix_fmt','yuv420p')
+    if ($needScale) { $vargs += '-vf',"scale=${tW}:${tH}:force_original_aspect_ratio=decrease" }
+    if (($meta.width -ge 3840 -or $meta.height -ge 2160) -and $Allow4K -and ($meta.fps -gt 30)) { $vargs += '-r','30' }
+    $crf = 24
+    if ($tW -ge 3840 -or $tH -ge 2160) { $crf = 26 }
+    elseif ($tW -le 1280 -and $tH -le 720) { $crf = 22 }
+    $vargs += '-crf',[string]$crf,'-preset','medium'
+    $aargs = @()
+    if ($copyA) { $aargs += '-c:a','copy' } else { $aargs += '-c:a','aac','-b:a','192k' }
+    $args + $vargs + $aargs
+}
+
 function Start-FFmpegWithProgress($ffmpegPath,$args,$duration,$activityName,$parentId) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $ffmpegPath
@@ -176,12 +207,19 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
     $compatible = Is-Compatible $meta -Allow4K:$Allow4K
     if ($compatible -and -not $Force) { Write-Host "Pomijanie (kompatybilny): $($file.FullName)" -ForegroundColor Green; return }
     $ext = Get-Container $VideoCodec
+    if ($AutoProfile) {
+        $okV = @('hevc','h265','h264','avc','vp9','av1','mpeg1video','mpeg2video','avs2')
+        $canCopyV1080 = ($okV -contains $meta.vcodec) -and ($meta.width -le 1920 -and $meta.height -le 1080)
+        $canCopyV4K = ($okV -contains $meta.vcodec) -and ($meta.width -ge 3840 -or $meta.height -ge 2160) -and ($meta.fps -le 30) -and $Allow4K
+        $copyV = $canCopyV1080 -or $canCopyV4K
+        if ($copyV) { $ext = Get-Container $meta.vcodec } else { $ext = 'mp4' }
+    }
     $odir = if ($OutputDir) { $OutputDir } else { Join-Path $file.Directory.FullName 'converted' }
     if (-not (Test-Path $odir)) { New-Item -ItemType Directory -Path $odir | Out-Null }
     $outName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name) + '_proj.' + $ext
     $outPath = Join-Path $odir $outName
-    $args = Build-Args $meta $VideoCodec $AudioCodec -Allow4K:$Allow4K $VideoBitrate $AudioBitrate -Overwrite:$Overwrite
-    $ffArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @('-progress','pipe:1','-nostats',('"' + $outPath + '"'))
+    $args = if ($AutoProfile) { Build-AutoArgs $meta -Allow4K:$Allow4K $ext -Overwrite:$Overwrite } else { Build-Args $meta $VideoCodec $AudioCodec -Allow4K:$Allow4K $VideoBitrate $AudioBitrate -Overwrite:$Overwrite }
+    $ffArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @('-progress','pipe:1','-nostats',('"' + $finalOut + '"'))
     Write-Host ("Konwersja: {0} -> {1}" -f $file.FullName,$outPath) -ForegroundColor Cyan
     $cmdStr = "ffmpeg " + ($ffArgs -join ' ')
     Write-Host ("Polecenie: " + $cmdStr) -ForegroundColor DarkGray
