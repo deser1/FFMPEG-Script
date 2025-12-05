@@ -236,6 +236,7 @@ function Append-Metrics($obj,$LogPath) {
 function Print-FinalSummary($outs) {
     if (-not $outs -or $outs.Count -eq 0) { Write-Host "Brak plików wyjściowych" -ForegroundColor Yellow; return }
     Write-Host "Podsumowanie wyników" -ForegroundColor Cyan
+    $rows = @()
     foreach($p in $outs) {
         try {
             $j = ffprobe -hide_banner -v error -select_streams v:0 -show_entries stream=codec_name,width,height,r_frame_rate -show_format -of json -- "$p" | ConvertFrom-Json
@@ -248,8 +249,11 @@ function Print-FinalSummary($outs) {
                 else { $fps = [double]$r }
             } catch { $fps = 0 }
             $sizeGB = [math]::Round(([double]$f.size)/1073741824.0,2)
-            Write-Host ("{0} | v={1} {2}x{3} {4}fps | dur={5}s | size={6} GB" -f $f.filename,$v.codec_name,$v.width,$v.height,[math]::Round($fps,3),[double]$f.duration,$sizeGB) -ForegroundColor Green
-        } catch { Write-Host ("Nie udało się odczytać: " + $p) -ForegroundColor Yellow }
+            $rows += [pscustomobject]@{ filename = $f.filename; vcodec = $v.codec_name; width = [int]$v.width; height = [int]$v.height; fps = [double]$fps; duration = [double]$f.duration; sizeGB = [double]$sizeGB }
+        } catch { }
+    }
+    foreach($row in ($rows | Sort-Object sizeGB -Descending)) {
+        Write-Host ("{0} | v={1} {2}x{3} {4}fps | dur={5}s | size={6} GB" -f $row.filename,$row.vcodec,$row.width,$row.height,[math]::Round($row.fps,3),$row.duration,$row.sizeGB) -ForegroundColor Green
     }
 }
 
