@@ -1,54 +1,77 @@
-Co zrobiłem
+Przewodnik użytkownika – convert-projector.ps1
 
-- Dodałem skrypt convert-projector.ps1 w bieżącym folderze do konwersji filmów do ustawień zgodnych z Twoim projektorem.
-- Domyślnie koduje do HEVC (H.265) + AAC w kontenerze MP4 , ograniczając rozdzielczość do 1080p (z zachowaniem proporcji). Opcjonalnie pozwala zachować 4K , o ile nie przekracza 30 fps .
-- Obsługuje wybór pojedynczego pliku lub katalogu (interaktywnie lub przez parametr), przetwarzanie rekurencyjne, pomijanie już kompatybilnych plików, wymuszenie rekodowania, nadpisywanie i tryb podglądu poleceń.
-Jak używać
+Opis
 
-- Interaktywnie (wybór pliku lub folderu w okienku):
-  - powershell -File .\convert-projector.ps1
-- Katalog rekurencyjnie do 1080p HEVC/AAC:
-  - powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -Recursive
-- Zachowanie 4K jeśli ≤30 fps (inaczej ogranicza do 30 fps):
-  - powershell -File .\convert-projector.ps1 -Path "D:\Filmy4K" -Allow4K
-- Wymuszenie konwersji nawet gdy plik już kompatybilny:
-  - powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -Force
-- Nadpisywanie istniejących wyników:
-  - powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -Overwrite
-- Własne kodeki i bitrate:
-  - powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -VideoCodec h264 -AudioCodec mp3 -VideoBitrate 4M -AudioBitrate 192k
-- Własny katalog wyjściowy:
-  - powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -OutputDir "D:\Wyjscie"
-- Podgląd, bez faktycznej konwersji (pokazuje polecenia ffmpeg):
-  - powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -DryRun
-- Pomoc:
-  - powershell -File .\convert-projector.ps1 -Help
-Domyślne decyzje i zgodność
+- Konwersja plików wideo do formatu zgodnego z projektorem: kontener `mp4`, wideo `HEVC (H.265)` lub automatyczny wybór, audio `AAC`, skalowanie do `1080p` lub opcjonalnie `4K` (≤30 fps).
+- Obsługa pojedynczego pliku lub katalogu, tryb rekurencyjny, pomijanie już kompatybilnych plików, wymuszenie rekodowania i nadpisywania.
+- Kontrola jakości: VMAF (model `version=vmaf_v0.6.1`) z automatycznym fallbackiem do SSIM, zapis wyników do `JSONL`.
+- Progres w czasie rzeczywistym: wyświetlanie „X GB / Y GB” (ilość danych wyjściowych względem rozmiaru oryginału).
 
-- Wideo: HEVC (libx265) z tagiem hvc1 w MP4 ( convert-projector.ps1:98–108 , convert-projector.ps1:86–95 ).
-- Audio: AAC 192 kb/s ( convert-projector.ps1:116–123 ).
-- Rozdzielczość: skaluje do 1920x1080 (bez rozciągania, force_original_aspect_ratio=decrease ) lub do 3840x2160 przy -Allow4K ( convert-projector.ps1:109–114 ).
-- 4K powyżej 30 fps: obniża fps do 30 jeśli -Allow4K ( convert-projector.ps1:114 ).
-- Pomija pliki już kompatybilne, chyba że -Force ( convert-projector.ps1:128–133 ).
-- Kontenery wg kodeka wideo:
-  - hevc/h264 -> mp4 , vp9 -> webm , av1 -> mkv , mpeg1/mpeg2 -> mpg ( convert-projector.ps1:86–95 ).
-- Dozwolone wejściowe kodeki wideo: HEVC/VP9/AVS2/AVC/H.264/AV1/MPEG1/MPEG2 ; audio: MP3/WMA/AAC . Sprawdzenie kompatybilności: convert-projector.ps1:73–84 .
 Wymagania
 
-- ffmpeg i ffprobe muszą być w PATH . Skrypt sprawdza to na starcie ( convert-projector.ps1:25–31 ).
-- Katalog wyników domyślnie tworzy się jako converted obok źródeł, a pliki mają sufiks _proj ( convert-projector.ps1:133–136 ).
-Ważne funkcje w skrypcie
+- `ffmpeg` i `ffprobe` w `PATH`.
+- Wspierane wejścia: `*.mp4, *.mkv, *.mov, *.avi, *.wmv, *.mpeg, *.mpg, *.webm, *.m4v, *.ts, *.m2ts`.
 
-- Show-Help : convert-projector.ps1:19
-- Wybór ścieżki (plik/folder): convert-projector.ps1:33–48
-- Zbieranie plików wejściowych (z rekurencją): convert-projector.ps1:50–59
-- Odczyt metadanych ffprobe: convert-projector.ps1:61–71
-- Sprawdzanie zgodności: convert-projector.ps1:73–84
-- Budowa parametrów ffmpeg: convert-projector.ps1:98–126
-- Konwersja pojedynczego pliku: convert-projector.ps1:128–142
-- Pętla przetwarzania i walidacja ścieżki: convert-projector.ps1:144–156
+Parametry i przełączniki
+
+- `-Path <ścieżka>`: plik lub katalog do przetworzenia. Gdy brak, pojawia się wybór interaktywny.
+- `-Recursive`: przetwarza podkatalogi.
+- `-Allow4K`: pozwala zachować 4K (przy `fps ≤ 30`), w razie wyższego `fps` ustawia `30 fps`.
+- `-VideoCodec <hevc|h264|vp9|av1|mpeg2|mpeg1>`: docelowy kodek wideo (gdy `-AutoProfile` nieaktywny).
+- `-AudioCodec <aac|mp3|wma>`: docelowy kodek audio.
+- `-OutputDir <katalog>`: docelowy katalog (domyślnie `converted` obok źródła).
+- `-Overwrite`: nadpisuje istniejące pliki wynikowe.
+- `-Force`: wymusza konwersję nawet gdy plik jest kompatybilny.
+- `-VideoBitrate <np. 4M>`: ustawia bitrate wideo (tryb ręczny).
+- `-AudioBitrate <np. 192k>`: ustawia bitrate audio.
+- `-DryRun`: nie uruchamia konwersji, pokazuje polecenia.
+- `-AutoProfile`: automatycznie decyduje o kopiowaniu vs transkodowaniu; domyślnie aktywne.
+- `-AiAdvisor`: pokazuje rekomendacje dla wybranych parametrów.
+- `-QualityCheck`: oblicza VMAF (lub SSIM) dla 60-sekundowej próbki.
+- `-LogPath <plik.jsonl>`: ścieżka dla logu metryk.
+- `-SampleSeconds <int>`: długość próbki do oceny jakości (domyślnie 30).
+- `-SampleStart <int>`: start próbki w sekundach (domyślnie 60).
+
+Domyślne zachowanie
+
+- Wideo: `libx265`, `pix_fmt yuv420p`, tag `hvc1`, `-crf` dostosowany do celu (`1080p/4K`), `preset medium`.
+- Audio: `AAC 192k` lub kopiowanie gdy kompatybilne.
+- Skalowanie: `force_original_aspect_ratio=decrease` do `1920x1080` (lub do `3840x2160` przy `-Allow4K`).
+- `-movflags +faststart`: optymalizacja MP4 (szybsze otwieranie).
+- Pomiń kompatybilne pliki bez `-Force`.
+- Dobór kontenera: `hevc/h264 -> mp4`, `vp9 -> webm`, `av1 -> mkv`, `mpeg1/mpeg2 -> mpg`.
+
+Jakość (VMAF/SSIM)
+
+- VMAF: `libvmaf` z `model=version=vmaf_v0.6.1`, kolejność wejść `[zrekodowany][referencja]`.
+- Fallback: gdy VMAF nie powiedzie się, obliczany jest `SSIM` z komunikatu konsoli FFmpeg.
+- Wyniki zapisują się do `JSONL` (każda linia to jeden rekord, z polami `vmaf`, `ssim`).
+
+Logi i wyjście
+
+- Struktura rekordów: `source`, `output`, wymiary/fps wejścia, kodeki wejściowe, `allow4k`, `success`, `vmaf`, `ssim`, `time`.
+- Pliki wynikowe mają sufiks `_proj` i trafiają do podanego `OutputDir`.
+
+Przykłady
+
+- Interaktywnie z wyborem:
+  - `powershell -File .\convert-projector.ps1`
+- Katalog rekurencyjnie (1080p HEVC/AAC):
+  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -Recursive`
+- Zachowaj 4K (≤30 fps):
+  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy4K" -Allow4K`
+- Wymuś konwersję:
+  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -Force`
+- Nadpisz wyniki:
+  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -Overwrite`
+- Ręcznie ustaw kodeki/bitrate:
+  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -VideoCodec h264 -AudioCodec mp3 -VideoBitrate 4M -AudioBitrate 192k`
+- Własny katalog wyjściowy:
+  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -OutputDir "D:\Wyjscie"`
+- Sprawdzenie jakości (próbka 60 s):
+  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -QualityCheck -SampleSeconds 60`
+
 Uwagi techniczne
 
-- WMA kodowanie ( wmav2 ) może nie być dostępne w każdej kompilacji ffmpeg; w razie problemów użyj -AudioCodec aac .
-- AVS2 traktuję jako akceptowalny format wejściowy; docelowe kodowanie do AVS2 nie jest konfigurowane.
-- Skrypt nie podnosi rozdzielczości; skaluje tylko w dół, zachowując proporcje.
+- Kodowanie `wmav2` może nie być dostępne we wszystkich buildach FFmpeg; alternatywnie użyj `-AudioCodec aac`.
+- Skrypt nie podnosi rozdzielczości (tylko skalowanie w dół, zachowanie proporcji).

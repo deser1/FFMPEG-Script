@@ -145,7 +145,7 @@ function Build-Args($meta,$VideoCodec,$AudioCodec,[switch]$Allow4K,$VideoBitrate
     if ($AudioBitrate) { $aargs += '-b:a',$AudioBitrate } else { $aargs += '-b:a','192k' }
     $args = @('-y')
     if (-not $Overwrite) { $args = @() }
-    $args + $vargs + $aargs
+    $args + $vargs + $aargs + @('-movflags','+faststart')
 }
 
 function Build-AutoArgs($meta,[switch]$Allow4K,[string]$TargetContainer,[switch]$Overwrite) {
@@ -183,7 +183,7 @@ function Build-AutoArgs($meta,[switch]$Allow4K,[string]$TargetContainer,[switch]
         $aSel = $(if ($copyA) { 'copy' } else { $aargs[1] })
         Write-Host ("Ai: transkod v={0} crf={1} preset=medium pix=yuv420p scale={2} fps={3} a={4} kontener={5}" -f $vcodec,$crf,$sc,$fpsInfo,$aSel,$TargetContainer) -ForegroundColor DarkCyan
     }
-    $args + $vargs + $aargs
+    $args + $vargs + $aargs + @('-movflags','+faststart')
 }
 
 function Compute-VMAF($ref,$dist,$tw,$th,$startSec,$durSec) {
@@ -231,7 +231,7 @@ function Append-Metrics($obj,$LogPath) {
     } catch { Write-Host "Nie udało się zapisać logu" -ForegroundColor Yellow }
 }
 
-function Start-FFmpegWithProgress($ffmpegPath,$args,$duration,$activityName,$parentId) {
+function Start-FFmpegWithProgress($ffmpegPath,$args,$duration,$activityName,$parentId,$origBytes) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $ffmpegPath
     $psi.RedirectStandardOutput = $true
@@ -247,16 +247,28 @@ function Start-FFmpegWithProgress($ffmpegPath,$args,$duration,$activityName,$par
         if (-not $p.StandardOutput.EndOfStream) {
             $line = $p.StandardOutput.ReadLine()
             if ($null -ne $line){
+                $status = $null
+                $pct = 0
                 if ($line -like 'out_time_ms=*'){
                     $ms = [double]($line.Split('=')[1])
                     $sec = [double]($ms/1000000.0)
                     if ($duration -gt 0){
                         $pct = [math]::Min(100,[math]::Round(($sec/$duration)*100,2))
-                        Write-Progress -Id 1 -ParentId $parentId -Activity $activityName -Status ("{0}% ({1}s)" -f $pct,[int]$sec) -PercentComplete $pct
-                    } else {
-                        $si = ($si + 1) % $spinner.Count
-                        Write-Progress -Id 1 -ParentId $parentId -Activity $activityName -Status $spinner[$si] -PercentComplete 0
                     }
+                }
+                if ($line -like 'total_size=*'){
+                    $bytes = [double]($line.Split('=')[1])
+                    $gbConv = [math]::Round($bytes/1073741824.0,2)
+                    $gbOrig = [math]::Round($origBytes/1073741824.0,2)
+                    $status = ("{0} GB / {1} GB" -f $gbConv,$gbOrig)
+                }
+                if ($status){
+                    Write-Progress -Id 1 -ParentId $parentId -Activity $activityName -Status $status -PercentComplete $pct
+                } elseif ($pct -gt 0){
+                    Write-Progress -Id 1 -ParentId $parentId -Activity $activityName -Status ("{0}%" -f $pct) -PercentComplete $pct
+                } else {
+                    $si = ($si + 1) % $spinner.Count
+                    Write-Progress -Id 1 -ParentId $parentId -Activity $activityName -Status $spinner[$si] -PercentComplete 0
                 }
             }
         } else {
@@ -295,12 +307,12 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
         $finalOut = $candidate
     }
     $args = if ($AutoProfile) { Build-AutoArgs $meta -Allow4K:$Allow4K $ext -Overwrite:$Overwrite } else { Build-Args $meta $VideoCodec $AudioCodec -Allow4K:$Allow4K $VideoBitrate $AudioBitrate -Overwrite:$Overwrite }
-    $ffArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @(('"' + $finalOut + '"'))
+    $ffArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @('-progress','pipe:1','-nostats',('"' + $finalOut + '"'))
     Write-Host ("Konwersja: {0} -> {1}" -f $file.FullName,$finalOut) -ForegroundColor Cyan
     $cmdStr = "ffmpeg " + ($ffArgs -join ' ')
     Write-Host ("Polecenie: " + $cmdStr) -ForegroundColor DarkGray
     if ($DryRun) { Write-Host ("[DRY] pomijam uruchomienie") -ForegroundColor Yellow; return }
-    & ffmpeg $ffArgs
+    $res = Start-FFmpegWithProgress 'ffmpeg' $ffArgs $meta.duration ("Konwersja: " + $file.Name) 0 $file.Length
     $ok = $false
     if (Test-Path -LiteralPath $finalOut) {
         $okProbe = $false
@@ -363,7 +375,7 @@ if (-not $Path) {
 
 if (-not (Test-Path -LiteralPath $Path)) { Write-Error "Ścieżka nie istnieje: $Path"; exit 1 }
 
-$items = Get-InputItems -InPath $Path -Recursive:$Recursive -ExcludePath $OutputDir
+$items = Get-InputItems -InPath $Path -Recursive:$Recursive -ExcludePath $OutputDir | Sort-Object Length
 if (-not $items -or $items.Count -eq 0) { Write-Error "Brak plików wideo do przetworzenia"; exit 1 }
 
 $i = 0
