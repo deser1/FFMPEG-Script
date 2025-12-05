@@ -1,0 +1,4 @@
+# Ignore files
+vmaf_*.json
+vmaf_*.fcs
+conversion-log.jsonl

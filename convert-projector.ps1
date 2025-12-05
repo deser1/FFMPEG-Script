@@ -60,11 +60,12 @@ function Select-Path {
 }
 
 function Get-InputItems {
-    param([string]$InPath,[switch]$Recursive)
+    param([string]$InPath,[switch]$Recursive,[string]$ExcludePath)
     $ext = @('*.mp4','*.mkv','*.mov','*.avi','*.wmv','*.mpeg','*.mpg','*.webm','*.m4v','*.ts','*.m2ts')
     if (Test-Path -LiteralPath $InPath) {
         if ((Get-Item -LiteralPath $InPath).PSIsContainer) {
             $items = foreach($e in $ext){ if ($Recursive) { Get-ChildItem -LiteralPath $InPath -Filter $e -File -Recurse } else { Get-ChildItem -LiteralPath $InPath -Filter $e -File } }
+            if ($ExcludePath) { $items = $items | Where-Object { -not $_.FullName.StartsWith($ExcludePath,[System.StringComparison]::OrdinalIgnoreCase) } }
             $items
         } else { Get-Item -LiteralPath $InPath }
     } else { @() }
@@ -187,12 +188,30 @@ function Build-AutoArgs($meta,[switch]$Allow4K,[string]$TargetContainer,[switch]
 
 function Compute-VMAF($ref,$dist,$tw,$th,$startSec,$durSec) {
     try {
-        $tmp = [System.IO.Path]::GetTempFileName()
-        $fltc = "[0:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[rf];[1:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[ds];[rf][ds]libvmaf=log_path=${tmp}:log_fmt=json:n_threads=4"
-        & ffmpeg -hide_banner -nostdin -ss $startSec -t $durSec -i $ref -ss $startSec -t $durSec -i $dist -lavfi $fltc -f null - | Out-Null
-        $j = Get-Content -LiteralPath $tmp -Raw | ConvertFrom-Json
-        Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
-        return [double]$j.metrics.VMAF_mean
+        $guid = [System.Guid]::NewGuid().ToString()
+        $log = "vmaf_${guid}.json"
+        $fcs = "vmaf_${guid}.fcs"
+        $modelOpt = ":model=version=vmaf_v0.6.1"
+        $fg = "[0:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[rf];[1:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[ds];[ds][rf]libvmaf=log_path='${log}':log_fmt=json:n_threads=4:shortest=1${modelOpt}"
+        $fg | Out-File -LiteralPath $fcs -Encoding ascii
+        & ffmpeg -hide_banner -nostdin -ss $startSec -t $durSec -i $ref -ss $startSec -t $durSec -i $dist -filter_complex_script $fcs -f null - | Out-Null
+        $j = Get-Content -LiteralPath $log -Raw | ConvertFrom-Json
+        Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $fcs -ErrorAction SilentlyContinue
+        $score = $null
+        if ($j.metrics -and $j.metrics.VMAF_mean) { $score = [double]$j.metrics.VMAF_mean }
+        elseif ($j.pooled_metrics -and $j.pooled_metrics.vmaf -and $j.pooled_metrics.vmaf.mean) { $score = [double]$j.pooled_metrics.vmaf.mean }
+        return $score
+    } catch { return $null }
+}
+
+function Compute-SSIM($ref,$dist,$tw,$th,$startSec,$durSec) {
+    try {
+        $fltc = "[0:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[rf];[1:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[ds];[rf][ds]ssim"
+        $o = & ffmpeg -hide_banner -nostdin -ss $startSec -t $durSec -i $ref -ss $startSec -t $durSec -i $dist -filter_complex $fltc -f null - 2>&1
+        $text = ($o | Out-String)
+        $m = [regex]::Match($text,'SSIM.*All:\s*([0-9\.]+)')
+        if ($m.Success) { return [double]$m.Groups[1].Value } else { return $null }
     } catch { return $null }
 }
 
@@ -276,21 +295,31 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
         $finalOut = $candidate
     }
     $args = if ($AutoProfile) { Build-AutoArgs $meta -Allow4K:$Allow4K $ext -Overwrite:$Overwrite } else { Build-Args $meta $VideoCodec $AudioCodec -Allow4K:$Allow4K $VideoBitrate $AudioBitrate -Overwrite:$Overwrite }
-    $ffArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @('-progress','pipe:1','-nostats',('"' + $finalOut + '"'))
+    $ffArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @(('"' + $finalOut + '"'))
     Write-Host ("Konwersja: {0} -> {1}" -f $file.FullName,$finalOut) -ForegroundColor Cyan
     $cmdStr = "ffmpeg " + ($ffArgs -join ' ')
     Write-Host ("Polecenie: " + $cmdStr) -ForegroundColor DarkGray
     if ($DryRun) { Write-Host ("[DRY] pomijam uruchomienie") -ForegroundColor Yellow; return }
-    $res = Start-FFmpegWithProgress 'ffmpeg' $ffArgs $meta.duration ("Konwersja: " + $file.Name) 0
-    if (-not (Test-Path -LiteralPath $finalOut)) {
-        Write-Host "Ponowna próba bez progresu (diagnostyka)" -ForegroundColor Yellow
-        $plainArgs = @('-hide_banner','-nostdin','-v','warning','-i',$file.FullName) + $args + @($finalOut)
-        & ffmpeg $plainArgs
-    }
+    & ffmpeg $ffArgs
     $ok = $false
     if (Test-Path -LiteralPath $finalOut) {
-        $ok = $true
-        Write-Host ("Zapisano: " + $finalOut) -ForegroundColor Green
+        $okProbe = $false
+        try {
+            $probe = ffprobe -hide_banner -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 -- "$finalOut"
+            if ($LASTEXITCODE -eq 0 -and $probe) { $okProbe = $true }
+        } catch { $okProbe = $false }
+        if ($okProbe) {
+            $ok = $true
+            Write-Host ("Zapisano: " + $finalOut) -ForegroundColor Green
+        } else {
+            Write-Host ("Nieprawidłowy plik wyjściowy: " + $finalOut) -ForegroundColor Yellow
+            $plainArgs = @('-hide_banner','-nostdin','-v','warning','-i',$file.FullName) + $args + @($finalOut)
+            & ffmpeg $plainArgs
+            try {
+                $probe2 = ffprobe -hide_banner -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 -- "$finalOut"
+                if ($LASTEXITCODE -eq 0 -and $probe2) { $ok = $true; Write-Host ("Naprawiono: " + $finalOut) -ForegroundColor Green }
+            } catch { }
+        }
     } else {
         Write-Host ("Błąd konwersji (ExitCode=" + $res.ExitCode + "; LASTEXITCODE=" + $LASTEXITCODE + ")") -ForegroundColor Red
         Write-Host ("Polecenie: " + $cmdStr) -ForegroundColor DarkYellow
@@ -300,7 +329,11 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
     $start = 0
     if ($meta.duration -gt ($SampleStart + $SampleSeconds)) { $start = $SampleStart } elseif ($meta.duration -gt $SampleSeconds) { $start = [int]([double]$meta.duration - $SampleSeconds) }
     $vmaf = $null
-    if ($QualityCheck -and $ok) { $vmaf = Compute-VMAF $file.FullName $finalOut $tw $th $start $SampleSeconds }
+    $ssim = $null
+    if ($QualityCheck -and $ok) {
+        $vmaf = Compute-VMAF $file.FullName $finalOut $tw $th $start $SampleSeconds
+        if ($null -eq $vmaf) { $ssim = Compute-SSIM $file.FullName $finalOut $tw $th $start $SampleSeconds }
+    }
     $rec = [pscustomobject]@{
         source = $file.FullName
         output = $finalOut
@@ -312,6 +345,7 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
         allow4k = [bool]$Allow4K
         success = [bool]$ok
         vmaf = $vmaf
+        ssim = $ssim
         time = (Get-Date).ToString('s')
     }
     Append-Metrics $rec $LogPath
@@ -329,7 +363,7 @@ if (-not $Path) {
 
 if (-not (Test-Path -LiteralPath $Path)) { Write-Error "Ścieżka nie istnieje: $Path"; exit 1 }
 
-$items = Get-InputItems -InPath $Path -Recursive:$Recursive
+$items = Get-InputItems -InPath $Path -Recursive:$Recursive -ExcludePath $OutputDir
 if (-not $items -or $items.Count -eq 0) { Write-Error "Brak plików wideo do przetworzenia"; exit 1 }
 
 $i = 0
