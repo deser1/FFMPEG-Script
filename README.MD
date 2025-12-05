@@ -28,9 +28,10 @@ Parametry i przełączniki
 - `-AutoProfile`: automatycznie decyduje o kopiowaniu vs transkodowaniu; domyślnie aktywne.
 - `-AiAdvisor`: pokazuje rekomendacje dla wybranych parametrów.
 - `-QualityCheck`: oblicza VMAF (lub SSIM) dla 60-sekundowej próbki.
-- `-LogPath <plik.jsonl>`: ścieżka dla logu metryk.
-- `-SampleSeconds <int>`: długość próbki do oceny jakości (domyślnie 30).
-- `-SampleStart <int>`: start próbki w sekundach (domyślnie 60).
+31→- `-LogPath <plik.jsonl>`: ścieżka dla logu metryk.
+32→- `-SampleSeconds <int>`: długość próbki do oceny jakości (domyślnie 30).
+33→- `-SampleStart <int>`: start próbki w sekundach (domyślnie 60).
+34→- `-SingleSmallest`: przetwarza tylko najmniejszy plik w katalogu.
 
 Domyślne zachowanie
 
@@ -38,8 +39,9 @@ Domyślne zachowanie
 - Audio: `AAC 192k` lub kopiowanie gdy kompatybilne.
 - Skalowanie: `force_original_aspect_ratio=decrease` do `1920x1080` (lub do `3840x2160` przy `-Allow4K`).
 - `-movflags +faststart`: optymalizacja MP4 (szybsze otwieranie).
-- Pomiń kompatybilne pliki bez `-Force`.
-- Dobór kontenera: `hevc/h264 -> mp4`, `vp9 -> webm`, `av1 -> mkv`, `mpeg1/mpeg2 -> mpg`.
+41→- Pomiń kompatybilne pliki bez `-Force`.
+42→- Dobór kontenera: `hevc/h264 -> mp4`, `vp9 -> webm`, `av1 -> mkv`, `mpeg1/mpeg2 -> mpg`.
+43→- Fallback: przy błędzie konwersji skrypt uruchamia FFmpeg bez `-progress` i ponownie weryfikuje wynik `ffprobe`.
 
 Jakość (VMAF/SSIM)
 
@@ -49,15 +51,21 @@ Jakość (VMAF/SSIM)
 
 Logi i wyjście
 
-- Struktura rekordów: `source`, `output`, wymiary/fps wejścia, kodeki wejściowe, `allow4k`, `success`, `vmaf`, `ssim`, `time`.
-- Pliki wynikowe mają sufiks `_proj` i trafiają do podanego `OutputDir`.
+52→- Struktura rekordów: `source`, `output`, wymiary/fps wejścia, kodeki wejściowe, `allow4k`, `success`, `vmaf`, `ssim`, `time`.
+53→- Pliki wynikowe mają sufiks `_proj` i trafiają do podanego `OutputDir`.
+54→
+55→Podsumowanie serii
+56→
+57→- Po zakończeniu skrypt drukuje zbiorcze podsumowanie plików wynikowych posortowane po rozmiarze (malejąco) wraz z parametrami (`vcodec`, rozdzielczość, `fps`, długość, rozmiar w GB).
 
 Przykłady
 
-- Interaktywnie z wyborem:
-  - `powershell -File .\convert-projector.ps1`
-- Katalog rekurencyjnie (1080p HEVC/AAC):
-  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -Recursive`
+57→- Interaktywnie z wyborem:
+58→  - `powershell -File .\convert-projector.ps1`
+59→- Najmniejszy plik w katalogu do MP4 HEVC/AAC, wynik do `D:\Filmy\Projektor`:
+60→  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -SingleSmallest -OutputDir "D:\Filmy\Projektor"`
+61→- Katalog rekurencyjnie (1080p HEVC/AAC):
+62→  - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy" -Recursive`
 - Zachowaj 4K (≤30 fps):
   - `powershell -File .\convert-projector.ps1 -Path "D:\Filmy4K" -Allow4K`
 - Wymuś konwersję:

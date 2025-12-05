@@ -19,7 +19,8 @@ param(
     [switch]$QualityCheck,
     [string]$LogPath,
     [int]$SampleSeconds = 30,
-    [int]$SampleStart = 60
+    [int]$SampleStart = 60,
+    [switch]$SingleSmallest
 )
 
 $Outputs = @()
@@ -310,7 +311,7 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
     $compatible = Is-Compatible $meta -Allow4K:$Allow4K
     if ($compatible -and -not $Force) { Write-Host "Pomijanie (kompatybilny): $($file.FullName)" -ForegroundColor Green; return }
     $ext = Get-Container $VideoCodec
-    if ($AutoProfile) {
+    if ($AutoProfile -and -not $Force) {
         $okV = @('hevc','h265','h264','avc','vp9','av1','mpeg1video','mpeg2video','avs2')
         $canCopyV1080 = ($okV -contains $meta.vcodec) -and ($meta.width -le 1920 -and $meta.height -le 1080)
         $canCopyV4K = ($okV -contains $meta.vcodec) -and ($meta.width -ge 3840 -or $meta.height -ge 2160) -and ($meta.fps -le 30) -and $Allow4K
@@ -332,7 +333,7 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
         } while (Test-Path -LiteralPath $candidate)
         $finalOut = $candidate
     }
-    $args = if ($AutoProfile) { Build-AutoArgs $meta -Allow4K:$Allow4K $ext -Overwrite:$Overwrite } else { Build-Args $meta $VideoCodec $AudioCodec -Allow4K:$Allow4K $VideoBitrate $AudioBitrate -Overwrite:$Overwrite }
+    $args = if ($AutoProfile -and -not $Force) { Build-AutoArgs $meta -Allow4K:$Allow4K $ext -Overwrite:$Overwrite } else { Build-Args $meta $VideoCodec $AudioCodec -Allow4K:$Allow4K $VideoBitrate $AudioBitrate -Overwrite:$Overwrite }
     $ffArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @('-progress','pipe:1','-nostats',('"' + $finalOut + '"'))
     Write-Host ("Konwersja: {0} -> {1}" -f $file.FullName,$finalOut) -ForegroundColor Cyan
     $cmdStr = "ffmpeg " + ($ffArgs -join ' ')
@@ -355,7 +356,7 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
             Write-Host ("Wyjście: v={0} {1}x{2} {3}fps | size={4} GB" -f $ometa.vcodec,$ometa.width,$ometa.height,[math]::Round($ometa.fps,3),$osizeGB) -ForegroundColor Green
         } else {
             Write-Host ("Nieprawidłowy plik wyjściowy: " + $finalOut) -ForegroundColor Yellow
-            $plainArgs = @('-hide_banner','-nostdin','-v','warning','-i',$file.FullName) + $args + @($finalOut)
+            $plainArgs = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @(('"' + $finalOut + '"'))
             & ffmpeg $plainArgs
             try {
                 $probe2 = ffprobe -hide_banner -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 -- "$finalOut"
@@ -365,6 +366,21 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
     } else {
         Write-Host ("Błąd konwersji (ExitCode=" + $res.ExitCode + "; LASTEXITCODE=" + $LASTEXITCODE + ")") -ForegroundColor Red
         Write-Host ("Polecenie: " + $cmdStr) -ForegroundColor DarkYellow
+        $plainArgs2 = @('-hide_banner','-nostdin','-v','warning','-i',('"' + $file.FullName + '"')) + $args + @(('"' + $finalOut + '"'))
+        & ffmpeg $plainArgs2
+        if (Test-Path -LiteralPath $finalOut) {
+            try {
+                $probe3 = ffprobe -hide_banner -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 -- "$finalOut"
+                if ($LASTEXITCODE -eq 0 -and $probe3) {
+                    $ok = $true
+                    $script:Outputs += $finalOut
+                    Write-Host ("Naprawiono: " + $finalOut) -ForegroundColor Green
+                    $ometa = Probe-Video $finalOut
+                    $osizeGB = [math]::Round(((Get-Item -LiteralPath $finalOut).Length)/1073741824.0,2)
+                    Write-Host ("Wyjście: v={0} {1}x{2} {3}fps | size={4} GB" -f $ometa.vcodec,$ometa.width,$ometa.height,[math]::Round($ometa.fps,3),$osizeGB) -ForegroundColor Green
+                }
+            } catch { }
+        }
     }
     $tw = 1920; $th = 1080
     if ($Allow4K) { $tw = 3840; $th = 2160 }
@@ -406,6 +422,18 @@ if (-not $Path) {
 if (-not (Test-Path -LiteralPath $Path)) { Write-Error "Ścieżka nie istnieje: $Path"; exit 1 }
 
 $items = Get-InputItems -InPath $Path -Recursive:$Recursive -ExcludePath $OutputDir | Sort-Object Length
+if ($SingleSmallest) {
+    $all = $items
+    $items = @($all | Where-Object { $_.Name -notmatch '[#()]' } | Select-Object -First 1)
+    if (-not $items -or $items.Count -eq 0) { $items = @($all | Select-Object -First 1) }
+    if ($items -and $items.Count -gt 0) {
+        $ext = [System.IO.Path]::GetExtension($items[0].Name)
+        if ($ext -ne '.mp4') {
+            Write-Host ("Najmniejszy plik nie jest MP4: " + $items[0].FullName) -ForegroundColor Yellow
+            $items = @()
+        }
+    }
+}
 if (-not $items -or $items.Count -eq 0) { Write-Error "Brak plików wideo do przetworzenia"; exit 1 }
 
 $i = 0
