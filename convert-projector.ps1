@@ -22,6 +22,8 @@ param(
     [int]$SampleStart = 60
 )
 
+$Outputs = @()
+
 function Show-Help {
     Write-Host "Użycie: powershell -File convert-projector.ps1 [-Path <plik|katalog>] [-Recursive] [-Allow4K] [-VideoCodec <hevc|h264|vp9|av1|mpeg2|mpeg1>] [-AudioCodec <aac|mp3|wma>] [-OutputDir <katalog>] [-Overwrite] [-Force] [-VideoBitrate <np. 4M>] [-AudioBitrate <np. 192k>] [-DryRun] [-AutoProfile] [-AiAdvisor] [-QualityCheck] [-LogPath <plik>] [-SampleSeconds <int>] [-SampleStart <int>]" -ForegroundColor Yellow
 }
@@ -194,7 +196,7 @@ function Compute-VMAF($ref,$dist,$tw,$th,$startSec,$durSec) {
         $modelOpt = ":model=version=vmaf_v0.6.1"
         $fg = "[0:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[rf];[1:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[ds];[ds][rf]libvmaf=log_path='${log}':log_fmt=json:n_threads=4:shortest=1${modelOpt}"
         $fg | Out-File -LiteralPath $fcs -Encoding ascii
-        & ffmpeg -hide_banner -nostdin -ss $startSec -t $durSec -i $ref -ss $startSec -t $durSec -i $dist -filter_complex_script $fcs -f null - | Out-Null
+        & ffmpeg -hide_banner -nostdin -ss $startSec -t $durSec -i $ref -ss $startSec -t $durSec -i $dist -an -filter_complex_script $fcs -f null - | Out-Null
         $j = Get-Content -LiteralPath $log -Raw | ConvertFrom-Json
         Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $fcs -ErrorAction SilentlyContinue
@@ -208,7 +210,7 @@ function Compute-VMAF($ref,$dist,$tw,$th,$startSec,$durSec) {
 function Compute-SSIM($ref,$dist,$tw,$th,$startSec,$durSec) {
     try {
         $fltc = "[0:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[rf];[1:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease:flags=bicubic[ds];[rf][ds]ssim"
-        $o = & ffmpeg -hide_banner -nostdin -ss $startSec -t $durSec -i $ref -ss $startSec -t $durSec -i $dist -filter_complex $fltc -f null - 2>&1
+        $o = & ffmpeg -hide_banner -nostdin -ss $startSec -t $durSec -i $ref -ss $startSec -t $durSec -i $dist -an -filter_complex $fltc -f null - 2>&1
         $text = ($o | Out-String)
         $m = [regex]::Match($text,'SSIM.*All:\s*([0-9\.]+)')
         if ($m.Success) { return [double]$m.Groups[1].Value } else { return $null }
@@ -229,6 +231,26 @@ function Append-Metrics($obj,$LogPath) {
             $line | Out-File -LiteralPath $lp -Append -Encoding utf8
         }
     } catch { Write-Host "Nie udało się zapisać logu" -ForegroundColor Yellow }
+}
+
+function Print-FinalSummary($outs) {
+    if (-not $outs -or $outs.Count -eq 0) { Write-Host "Brak plików wyjściowych" -ForegroundColor Yellow; return }
+    Write-Host "Podsumowanie wyników" -ForegroundColor Cyan
+    foreach($p in $outs) {
+        try {
+            $j = ffprobe -hide_banner -v error -select_streams v:0 -show_entries stream=codec_name,width,height,r_frame_rate -show_format -of json -- "$p" | ConvertFrom-Json
+            $v = $j.streams[0]
+            $f = $j.format
+            $fps = 0
+            try {
+                $r = $v.r_frame_rate
+                if ($r -match '/') { $a,$b = $r -split '/'; if ([int]$b -ne 0) { $fps = [double]$a/[double]$b } else { $fps = 0 } }
+                else { $fps = [double]$r }
+            } catch { $fps = 0 }
+            $sizeGB = [math]::Round(([double]$f.size)/1073741824.0,2)
+            Write-Host ("{0} | v={1} {2}x{3} {4}fps | dur={5}s | size={6} GB" -f $f.filename,$v.codec_name,$v.width,$v.height,[math]::Round($fps,3),[double]$f.duration,$sizeGB) -ForegroundColor Green
+        } catch { Write-Host ("Nie udało się odczytać: " + $p) -ForegroundColor Yellow }
+    }
 }
 
 function Start-FFmpegWithProgress($ffmpegPath,$args,$duration,$activityName,$parentId,$origBytes) {
@@ -322,14 +344,18 @@ function Convert-File($file,$VideoCodec,$AudioCodec,[switch]$Allow4K,$OutputDir,
         } catch { $okProbe = $false }
         if ($okProbe) {
             $ok = $true
+            $script:Outputs += $finalOut
             Write-Host ("Zapisano: " + $finalOut) -ForegroundColor Green
+            $ometa = Probe-Video $finalOut
+            $osizeGB = [math]::Round(((Get-Item -LiteralPath $finalOut).Length)/1073741824.0,2)
+            Write-Host ("Wyjście: v={0} {1}x{2} {3}fps | size={4} GB" -f $ometa.vcodec,$ometa.width,$ometa.height,[math]::Round($ometa.fps,3),$osizeGB) -ForegroundColor Green
         } else {
             Write-Host ("Nieprawidłowy plik wyjściowy: " + $finalOut) -ForegroundColor Yellow
             $plainArgs = @('-hide_banner','-nostdin','-v','warning','-i',$file.FullName) + $args + @($finalOut)
             & ffmpeg $plainArgs
             try {
                 $probe2 = ffprobe -hide_banner -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 -- "$finalOut"
-                if ($LASTEXITCODE -eq 0 -and $probe2) { $ok = $true; Write-Host ("Naprawiono: " + $finalOut) -ForegroundColor Green }
+                if ($LASTEXITCODE -eq 0 -and $probe2) { $ok = $true; $script:Outputs += $finalOut; Write-Host ("Naprawiono: " + $finalOut) -ForegroundColor Green; $ometa = Probe-Video $finalOut; $osizeGB = [math]::Round(((Get-Item -LiteralPath $finalOut).Length)/1073741824.0,2); Write-Host ("Wyjście: v={0} {1}x{2} {3}fps | size={4} GB" -f $ometa.vcodec,$ometa.width,$ometa.height,[math]::Round($ometa.fps,3),$osizeGB) -ForegroundColor Green }
             } catch { }
         }
     } else {
@@ -387,5 +413,7 @@ foreach($f in $items) {
     $i++
 }
 Write-Progress -Id 0 -Activity 'Postep zadania' -Completed
+
+Print-FinalSummary $Outputs
 
 Write-Host 'Zakonczono' -ForegroundColor Green
