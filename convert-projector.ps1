@@ -426,13 +426,6 @@ if ($SingleSmallest) {
     $all = $items
     $items = @($all | Where-Object { $_.Name -notmatch '[#()]' } | Select-Object -First 1)
     if (-not $items -or $items.Count -eq 0) { $items = @($all | Select-Object -First 1) }
-    if ($items -and $items.Count -gt 0) {
-        $ext = [System.IO.Path]::GetExtension($items[0].Name)
-        if ($ext -ne '.mp4') {
-            Write-Host ("Najmniejszy plik nie jest MP4: " + $items[0].FullName) -ForegroundColor Yellow
-            $items = @()
-        }
-    }
 }
 if (-not $items -or $items.Count -eq 0) { Write-Error "Brak plików wideo do przetworzenia"; exit 1 }
 
